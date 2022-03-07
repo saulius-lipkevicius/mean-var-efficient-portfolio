@@ -1,0 +1,273 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(rmgarch)
+library(parallel)
+library(quantmod)
+library(e1071) 
+library(matlib)
+library(tidyr)
+library(dplyr)
+library(e1071) 
+library(tidyverse)
+library(tseries)
+```
+
+
+```{r}
+#  Describe analysis interval
+startDate=as.Date('2016-04-20')
+endDate=as.Date('2021-05-15')
+
+#  Stocks
+getSymbols( "AAPL", from=startDate,to=endDate )
+getSymbols( "GOOG" ,from =startDate, to=endDate)
+getSymbols( "TSLA" ,  from=startDate, to=endDate)
+
+rAAPL<-weeklyReturn(AAPL)
+rGOOG<-weeklyReturn(GOOG)
+rTSLA<-weeklyReturn(TSLA)
+
+#  Fix table
+rX<-data.frame(rAAPL ,rGOOG ,rTSLA )
+names(rX)[1]<-"rAAPL"
+names(rX)[2]<-"rGOOG"
+names(rX)[3]<-"rTSLA"
+
+#  Perform kpss test on all stocks
+kpss.test(rX[,1], null="Trend")
+kpss.test(rX[,2], null="Trend")
+kpss.test(rX[,3], null="Trend")
+ 
+par(mfrow=c(3,1)) 
+plot(rX[,1])
+plot(rX[,2])
+plot(rX[,3])
+```
+
+Descriptive statistics
+```{r}
+stats = rX %>% 
+  summarize_all(funs(mean, sd, skewness, kurtosis, min, max)) %>%
+  gather() %>%
+  separate(key, c("var","type")) %>%
+  spread(type, value)
+
+dataStats = as.data.frame(t(stats[c(1,5,3,4,6,7,2)]))
+colnames(dataStats) = c("APPL","GOOG", "TSLA")
+
+data[1,] = c("APPL","GOOG", "TSLA")
+row.names(dataStats)[1] = c("stock")
+```
+
+
+ARMA models for univariate case
+```{r}
+aic_criterion = matrix(data = NA, nrow = 4, ncol = length(rX))
+
+#aic table to find the best model
+for (i in 1:length(rX)) {
+  aic_criterion[1,i] = arima(rX[,i], order = c(1,0,1))$aic
+  aic_criterion[2,i] = arima(rX[,i], order = c(1,0,2))$aic
+  aic_criterion[3,i] = arima(rX[,i], order = c(2,0,1))$aic
+  aic_criterion[4,i] = arima(rX[,i], order = c(2,0,2))$aic
+}
+
+data.frame(aic_criterion)
+```
+
+Mean and standard deviation of portfolio returns.
+```{r}
+means = matrix(data = NA, nrow = length(rX), ncol = 1)
+means[1,1] = arima(rX[,1], order = c(2,0,2))$coef["intercept"]
+means[2,1] = arima(rX[,2], order = c(1,0,1))$coef["intercept"]
+means[3,1] = arima(rX[,3], order = c(1,0,1))$coef["intercept"]
+
+means
+```
+
+Test which univariate GARCH model is the best for every stocks seperately.
+```{r}
+garch_models = matrix(data = NA, nrow = 4, ncol = length(rX))
+for (i in 1:length(rX)) {
+  ug_spec = ugarchspec(mean.model=list(armaOrder=c(1,1)))
+  ugfit = ugarchfit(spec = ug_spec, data = rX[,i], AIC = TRUE)
+  garch_models[1,i] = ifelse(ugfit@fit$convergence == 1, NA , infocriteria(ugfit)[1]) 
+  
+  ug_spec = ugarchspec(mean.model=list(armaOrder=c(1,2)))
+  ugfit = ugarchfit(spec = ug_spec, data = rX[,i], AIC = TRUE)
+  garch_models[2,i] = ifelse(ugfit@fit$convergence == 1, NA , infocriteria(ugfit)[1]) 
+  
+  ug_spec = ugarchspec(mean.model=list(armaOrder=c(2,1)))
+  ugfit = ugarchfit(spec = ug_spec, data = rX[,i], AIC = TRUE)
+  garch_models[3,i] = ifelse(ugfit@fit$convergence == 1, NA , infocriteria(ugfit)[1]) 
+}
+
+data.frame(garch_models)
+
+res1 = residuals(ugfit, standardize = TRUE)
+res2 = residuals(ugfit2, standardize = TRUE)
+cov(res1, res2, res1)
+```
+
+Taking only the best garch fits to get cov matrix
+```{r}
+#  create different specifications
+ug_spec = ugarchspec(mean.model=list(armaOrder=c(2,2)), variance.model = list( garchOrder = c(1, 2)))
+ugfit1 = ugarchfit(spec = ug_spec, data = rX[,1], AIC = TRUE)
+
+ug_spec = ugarchspec(mean.model=list(armaOrder=c(1,1)), variance.model = list( garchOrder = c(1, 1)))
+ugfit2 = ugarchfit(spec = ug_spec, data = rX[,2], AIC = TRUE)
+
+ug_spec = ugarchspec(mean.model=list(armaOrder=c(1,1)), variance.model = list( garchOrder = c(1, 2)))
+ugfit3 = ugarchfit(spec = ug_spec, data = rX[,3], AIC = TRUE)
+
+#  follow standardized residuals
+res1 = residuals(ugfit, standardize = TRUE)
+res2 = residuals(ugfit2, standardize = TRUE)
+res3 = residuals(ugfit3, standardize = TRUE)
+
+sigma1 = as.numeric(sigma(ugfit)[265])
+sigma2 = as.numeric(sigma(ugfit2)[265])
+sigma3 = as.numeric(sigma(ugfit3)[265])
+
+omega_uni[1,1] = as.numeric(cor(res1, res1)*sigma(ugfit1)[265] *sigma(ugfit1)[265])
+omega_uni[2,2] = as.numeric(cor(res2, res2)*sigma(ugfit2)[265] *sigma(ugfit2)[265])
+omega_uni[3,3] = as.numeric(cor(res3, res3)*sigma(ugfit3)[265] *sigma(ugfit3)[265])
+
+omega_uni[2,1] = omega_uni[1,2] = as.numeric(cor(res2, res1)*sigma(ugfit2)[265] *sigma(ugfit1)[265])
+omega_uni[3,1] = omega_uni[1,3] = as.numeric(cor(res3, res1)*sigma(ugfit3)[265] *sigma(ugfit1)[265])
+omega_uni[3,2] = omega_uni[2,3] = as.numeric(cor(res3, res2)*sigma(ugfit3)[265] *sigma(ugfit2)[265])
+
+dt = data.frame(res1, res2, res3)
+
+#  metrics of every suggested model specification
+cov(dt)
+mean(means)
+```
+
+Find correlation matrix and its inverse to calculate out 
+```{r}
+#  mean-variance maximization algorithm (using separate specified models for each stock)
+omega_uni = cov(dt)
+omega.inv_uni =  inv(omega_uni)
+
+e = matrix(rep(1, length(rX)), nrow = length(rX), ncol = 1)
+
+#  tau can be set manually if you already noticed a pattern
+tau = seq(2.86,2.94, by = 0.01)
+
+#  create a matrix for weights
+weights_uni = matrix(data = NA, nrow = length(tau), ncol =length(rX) )
+
+#  to follow assumptions of normality of returns
+Z = qnorm(0.05, mean = 0, sd = 1)
+
+#  iterative maximization algorithm
+for (i in 1:length(tau)) {
+A = t(e) %*% omega.inv_uni %*% e
+  
+B = (2*tau[i] + 1) %*% (t(means) %*% omega.inv_uni %*% e + t(e) %*% omega.inv_uni %*% means)
+
+C = (2*tau[i] + 1)^2 %*% (t(means) %*% omega.inv_uni %*% means) + Z
+ 
+lambda = (-B + sqrt(B^2 - 4%*%A%*%C)) %*% 1/A
+
+weights_uni[i,]  = ((2*tau[i] + 1) * omega.inv_uni %*% means + lambda[[1]] * omega.inv_uni %*% e) /
+        ( (2*tau[i] + 1) * t(e) %*% omega.inv_uni %*% means + lambda[[1]] * t(e) %*% omega.inv_uni %*% e)[[1]]
+}
+
+data.weights = data.frame(tau, weights_uni)
+data.weights_uni = data.weights
+```
+
+Apply DCC-GARCH model to rX dataframe and get dynamical covariation matrix.
+```{r}
+#  fit all models into "one"
+uspec.n = multispec(replicate(length(rX), ugarchspec(mean.model = list(armaOrder = c(1,1)), 
+                                                     variance.model = list(garchOrder = c(1,1), 
+                                                model = "sGARCH"))))
+
+multf = multifit(uspec.n, rX)
+spec1 = dccspec(uspec = uspec.n, dccOrder = c(1, 1), distribution = 'mvnorm')
+fit1 = dccfit(spec1, data = rX, fit.control = list(eval.se = TRUE), fit = multf, AIC = TRUE)
+
+cov1 = rcov(fit1)  # extracts the covariance matrix
+```
+
+
+```{r}
+omega_dcc = cov1[,,dim(cov1)[3]]
+omega.inv_dcc = inv(omega_dcc)
+
+tau = seq(0, 120, by=0.1)
+
+weights_dcc = matrix(data = NA, nrow = length(tau), ncol =length(rX) )
+
+for (i in 1:length(tau)) {
+A = t(e) %*% omega_dcc %*% e
+  
+B = (2*tau[i] + 1) %*% (t(means) %*% omega.inv_dcc %*% e + t(e) %*% omega.inv_dcc %*% means)
+
+C = (2*tau[i] + 1)^2 %*% (t(means) %*% omega.inv_dcc %*% means) + Z
+ 
+lambda = (-B + sqrt(B^2 - 4%*%A%*%C)) %*% 1/A
+
+weights_dcc[i,]  = ((2*tau[i] + 1) * omega.inv_dcc %*% means + lambda[[1]] * omega.inv_dcc %*% e) / ( (2*tau[i] + 1) * t(e) %*% omega.inv_dcc %*% means + lambda[[1]] * t(e) %*% omega.inv_dcc %*% e)[[1]]
+}
+
+data.weights_dcc = data.frame(tau, weights_dcc)
+
+# 0<=tau <=4.70 hence we can remove redundant values to plot it more clearly
+data.weights_dcc = data.weights_dcc[c(8:32),]
+weights_dcc = weights_dcc[c(8:32),]
+```
+
+Mean - VaR optimization using typical model and DCC
+```{r}
+VaR = matrix(data = NA, nrow = dim(data.weights_uni)[1], ncol = 1)
+mean_uni.after = weights_uni %*% means
+
+for (i in 1:dim(data.weights_uni)[1]) {
+  VaR[i,1] = -3 *(weights_uni[i,] %*% means + Z *sqrt(weights_uni[i,] %*% omega_dcc %*% as.matrix(t(weights_uni)[,i])))
+}
+
+#  DCC case
+VaR_dcc = matrix(data = NA, nrow = dim(data.weights_dcc)[1], ncol = 1)
+mean_dcc.after =  weights_dcc %*% means
+
+for (i in 1:dim(data.weights_dcc)[1]) {
+  VaR_dcc[i,1] = -3 *(weights_dcc[i,] %*% means + Z *sqrt(weights_dcc[i,] %*% omega_dcc %*% as.matrix(t(weights_dcc)[,i])))
+}
+```
+
+Random plots to analyze the optimal var-mean, with what coefficients (or distribution of portfolio) it becomes optimal
+```{r}
+tau = seq(2.86,2.94, by = 0.01)
+par(mfrow=c(1,2)) 
+
+plot(tau, mean_uni.after %*% 1/VaR,  type = "b", pch = 25, bty="l", ylab = "Mean VaR ratio")
+abline(v = 2.88, col="red", lwd=3, lty=2)
+
+plot(VaR, mean_uni.after, type = "b", pch = 25, bty="l", ylab = "Mean")
+tau = seq(0.7,3.1, by = 0.1)
+
+plot(tau, mean_dcc.after %*% 1/VaR_dcc, type = "b", pch = 25, bty="l", ylab = "Mean VaR ratio")
+abline(v = 2.3, col="red", lwd=3, lty=2)
+plot(VaR_dcc,mean_dcc.after, type = "b", pch = 25, bty="l", ylab = "Mean")
+
+#  DCC case
+jpeg("plotM.jpeg", width = 480, height = 480) # height and width can choose as your wish 
+par(mfrow=c(1,2)) 
+
+plot(tau, mean_dcc.after %*% 1/VaR_dcc, type = "b", pch = 25, bty="l", ylab = "Mean VaR ratio")
+abline(v = 2.3, col="red", lwd=3, lty=2)
+
+plot(VaR_dcc,mean_dcc.after, type = "b", pch = 25, bty="l", ylab = "Mean")
+dev.off()
+```
+
+
